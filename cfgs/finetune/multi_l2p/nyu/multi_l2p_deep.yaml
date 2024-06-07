@@ -1,5 +1,5 @@
 # NYU semseg config
-seed : 800
+seed : 1818
 
 # Finetune from:
 finetune:  "/root/datasets/multimae-b_98_rgb+-depth-semseg_1600e_multivit-afff3f8c (1).pth"
@@ -11,7 +11,7 @@ in_domains: rgb
 model: multivit_base
 patch_size: 16
 num_global_tokens: 1
-drop_path_encoder: 0.1
+drop_path_encoder: 0.0
 output_adapter: convnext
 decoder_dim: 6144
 decoder_preds_per_patch: 16
@@ -20,14 +20,14 @@ decoder_depth: 4
 # Train
 epochs: 1000
 opt: adamw
-lr: 0.0005 # = 1e-4
-warmup_lr: 0.00005 # = 1e-6
-min_lr: 0.000001
+lr: 0.00001 # = 1e-4
+warmup_lr: 0.0000001 # = 1e-6
+min_lr: 0.0000005
 warmup_epochs: 1
-train_batch_size: 16
-test_batch_size : 64
+train_batch_size: 12
+test_batch_size : 50
 input_size: 336
-layer_decay: 0.9
+layer_decay: 0.75
 
 # Augmentation
 aug_name: simple
@@ -50,10 +50,10 @@ prompt_pool : True
 prompt_shallow : False
 prompt_deep : True
 use_prompt_mask : True
-top_k : 5
-size : 10
-length : 20
-task_specific_prompt_length : 1
+top_k : 7
+size : 15
+length : 10
+task_specific_prompt_length : 20
 not_self_attn : False
 
 # Wandb and l0ogging

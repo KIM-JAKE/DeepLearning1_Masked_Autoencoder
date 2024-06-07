@@ -477,52 +477,6 @@ class SegmenterMaskTransformerAdapter(nn.Module):
 
         return masks
 
-class CrossMultiHeadAttention(nn.Module):
-    def __init__(self, embed_dim, num_heads):
-        super(CrossMultiHeadAttention, self).__init__()
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-
-        # 쿼리, 키, 값에 대한 프로젝션을 위한 선형 레이어
-        self.query_projection = nn.Linear(embed_dim, embed_dim)
-        self.key_projection = nn.Linear(embed_dim, embed_dim)
-        self.value_projection = nn.Linear(embed_dim, embed_dim)
-
-        # 최종 출력을 위한 선형 레이어
-        self.final_linear = nn.Linear(embed_dim, embed_dim)
-        
-        # 레이어 정규화
-        self.layer_norm = nn.LayerNorm(embed_dim)
-
-    def forward(self, query_seq, key_value_seq , prompt_size):
-        batch_size = query_seq.size(0)
-        
-        # 쿼리, 키, 값 프로젝션
-        query = self.query_projection(query_seq).view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
-        key = self.key_projection(key_value_seq).view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
-        value = self.value_projection(key_value_seq).view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
-        
-        
-        # 스케일드 닷 프로덕트 어텐션
-        scores = torch.matmul(query, key.transpose(-2, -1)) / (self.head_dim ** 0.5)
-        
-        # mask = torch.zeros_like(scores)
-        # mask[:, :, :prompt_size, :prompt_size] = float("-inf")
-        
-        scores = scores  
-        attn = F.softmax(scores, dim=-1)
-
-        # 어텐션 적용
-        context = torch.matmul(attn, value).transpose(1, 2).contiguous().view(batch_size, -1, self.embed_dim)
-        
-        # 최종 선형 레이어 및 Add & Norm
-        output = self.final_linear(context)
-        output = self.layer_norm(output + query_seq)
-        
-        return output
-
-
 class ConvNeXtAdapter(nn.Module):
     """Output adapter with ConvNext blocks for semantic segmentation
 
@@ -573,16 +527,28 @@ class ConvNeXtAdapter(nn.Module):
         self.not_self_attn = not_self_attn
         
         #For attention (prompt pool + task specific prompt)
-        self.self_attention1 = CrossMultiHeadAttention(embed_dim= self.dim_tokens_enc , num_heads= 12 )
         #blocks
         self.blocks = nn.Sequential(*[
             ConvNeXtBlock(dim=self.class_dim)
             for _ in range(depth)
         ])
 
+        self.norm_2 = nn.LayerNorm(self.dim_tokens_enc)
+        
         self.final_layer = nn.Conv2d(self.class_dim, self.num_classes, 1)
         self.apply(self._init_weights)
+        
+        self.query_projection = nn.Linear(self.dim_tokens_enc, self.dim_tokens_enc)
+        self.key_projection = nn.Linear(self.dim_tokens_enc, self.dim_tokens_enc)
+        self.value_projection = nn.Linear(self.dim_tokens_enc, self.dim_tokens_enc)
 
+        # self.out_projection = nn.Linear(self.dim_tokens_enc, self.dim_tokens_enc)
+        self.out_projection = nn.Linear(self.dim_tokens_enc, self.dim_tokens_enc)
+        self._init_weights(self.query_projection)
+        self._init_weights(self.key_projection)
+        self._init_weights(self.value_projection)
+        self._init_weights(self.out_projection)
+        
     def init(self, dim_tokens_enc: int = 768 
          ):
         """
@@ -624,7 +590,7 @@ class ConvNeXtAdapter(nn.Module):
         N_H, N_W = H // self.patch_size, W // self.patch_size
         
         x = self.adapt_tokens(encoder_tokens, input_info)
-        x = x[:,1:,:]
+
         zero_padding = torch.zeros(x.shape[0], self.task_specific_prompt_length , x.shape[2])
         
         original_img_emb = torch.cat([zero_padding.to('cuda'), original_img_emb] , dim = 1 )
@@ -652,16 +618,33 @@ class ConvNeXtAdapter(nn.Module):
         else : #self attention
             
             if self.num_classes == 1: #depth
-                x = torch.cat([x[:,:self.task_specific_prompt_length,:] , x[:,2*self.task_specific_prompt_length:,:]], dim = 1) #테스크 별 프롬프트 + 이미지 벡터
+                x = torch.cat([ x[:,:self.task_specific_prompt_length,:] , x[:,2*self.task_specific_prompt_length:,:]], dim = 1) #테스크 별 프롬프트 + 이미지 벡터
       
             elif self.num_classes == 40 :  #semseg
-                x = torch.cat([x[:,self.task_specific_prompt_length : 2*self.task_specific_prompt_length,:] ,  x[:,2*self.task_specific_prompt_length:,:]], dim = 1) #테스크 별 프롬프트 + 이미지 벡터
-  
- 
-        x = self.self_attention1(x,x,self.task_specific_prompt_length) # token self attention
+                x = torch.cat([ x[:,self.task_specific_prompt_length : 2*self.task_specific_prompt_length,:] ,  x[:,2*self.task_specific_prompt_length:,:]], dim = 1) #테스크 별 프롬프트 + 이미지 벡터
+        x_raw = x
         
-        x= x[:,self.task_specific_prompt_length:,:]
+        query = self.query_projection(x)
+        key = self.key_projection(x)
+        value = self.value_projection(x)
         
+        scores = torch.matmul(query, key.transpose(-2, -1)) / (self.embed_dim ** 0.5)
+        
+        mask = torch.zeros_like(scores)
+        mask[:, : :self.task_specific_prompt_length] = float("-1e16")
+            # 마스크 적용
+        scores = scores + mask
+        attn = F.softmax(scores, dim=-1)
+        context = torch.matmul(attn, value)     
+
+        x = self.out_projection(context) # B x promt_length(25) x 768
+
+        x = x_raw + x
+        
+        x = (self.norm_2(x))
+   
+        x= x[:, self.task_specific_prompt_length :,:]
+
         x = self.proj_dec(x)
             
         x = rearrange(x, "b n (p c) -> b (n p) c", n=N_H * N_W, p=self.preds_per_patch, c=self.class_dim)
@@ -676,7 +659,6 @@ class ConvNeXtAdapter(nn.Module):
             
         # Interpolate to semseg res
         x = F.interpolate(x, size=(H, W), mode=self.interpolate_mode)
-
         return x
 
 class DPTOutputAdapter(nn.Module):

@@ -25,7 +25,6 @@ import warnings
 from functools import partial
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Union
-from torchviz import make_dot
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
@@ -33,7 +32,7 @@ import torch.nn.functional as F
 import yaml
 from einops import rearrange
 
-import random
+
 import utils
 import utils.data_constants as data_constants
 from multimae import multimae_l2p
@@ -186,7 +185,7 @@ def get_args():
                         help='base patch size for image-like modalities')
     parser.add_argument('--input_size', default=512, type=int,
                         help='images input size for backbone')
-    parser.add_argument('--drop_path_encoder', type=float, default=0.2, metavar='PCT',
+    parser.add_argument('--drop_path_encoder', type=float, default=0.1, metavar='PCT',
                         help='Drop path rate (default: 0.1)')
     parser.add_argument('--learnable_pos_emb', action='store_true',
                         help='Makes the positional embedding learnable')
@@ -210,7 +209,7 @@ def get_args():
 
     # Optimizer parameters
     parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
-                        help='Optimizer (default: "adamw"')
+                        help='Optimizer (default: "adamw")')
     parser.add_argument('--opt_eps', default=1e-8, type=float, metavar='EPSILON',
                         help='Optimizer Epsilon (default: 1e-8)')
     parser.add_argument('--opt_betas', default=[0.9, 0.999], type=float, nargs='+', metavar='BETA',
@@ -219,7 +218,7 @@ def get_args():
                         help='Clip gradient norm (default: None, no clipping)')
     parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
                         help='SGD momentum (default: 0.9)')
-    parser.add_argument('--weight_decay', type=float, default=0.05,
+    parser.add_argument('--weight_decay', type=float, default=0.09,
                         help='weight decay (default: 0.05)')
     parser.add_argument('--weight_decay_end', type=float, default=None, help="""Final value of the
         weight decay. We use a cosine schedule for WD. 
@@ -294,7 +293,7 @@ def get_args():
     parser.add_argument('--no_dist_eval', action='store_false', dest='dist_eval',
                     help='Disabling distributed evaluation')
     parser.set_defaults(dist_eval=False)
-    parser.add_argument('--num_workers', default=4, type=int)
+    parser.add_argument('--num_workers', default=16, type=int)
     parser.add_argument('--pin_mem', action='store_true',
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem',
@@ -306,7 +305,7 @@ def get_args():
 
     parser.add_argument('--fp16', action='store_true')
     parser.add_argument('--no_fp16', action='store_false', dest='fp16')
-    parser.set_defaults(fp16=True)
+    parser.set_defaults(fp16= False )
 
     # Wandb logging
     parser.add_argument('--log_wandb', default=True, action='store_true',
@@ -341,7 +340,7 @@ def get_args():
 
     parser.add_argument('--shared_prompt_pool', default=False, type=bool)
     parser.add_argument('--shared_prompt_key', default=False, type=bool)
-    parser.add_argument('--batchwise_prompt', default=False, type=bool)
+    parser.add_argument('--batchwise_prompt', default=True, type=bool)
     parser.add_argument('--embedding_key', default='mean_max', type=str)
     parser.add_argument('--predefined_key', default='', type=str)
     parser.add_argument('--pull_constraint', default=True)
@@ -371,20 +370,16 @@ def get_args():
 
     return args
 
-def seed_everything(seed: int = 42):
-    random.seed(seed)
-    np.random.seed(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)  # type: ignore
-    torch.backends.cudnn.deterministic = True  # type: ignore
-    torch.backends.cudnn.benchmark = True  # type: ignore
-
 def main(args):
     device = torch.device(args.device)
 
-    seed_everything(args.seed)
-    
+    # fix the seed for reproducibility
+    seed = args.seed + utils.get_rank()
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    # random.seed(seed)
+
+    cudnn.benchmark = True
 
     if not args.show_user_warnings:
         warnings.filterwarnings("ignore", category=UserWarning)
@@ -494,14 +489,16 @@ def main(args):
             embed_dim=args.decoder_dim, patch_size=args.patch_size, 
             prompt_deep = args.prompt_deep , prompt_shallow = args.prompt_shallow,
             prompt_pool = args.prompt_pool,
-            prompt_length = args.length , top_k = args.top_k , pool_size = args.size , task_specific_prompt_length = args.task_specific_prompt_length , not_self_attn = args.not_self_attn , 
+            prompt_length = args.length , top_k = args.top_k , pool_size = args.size ,
+            task_specific_prompt_length = args.task_specific_prompt_length , not_self_attn = args.not_self_attn , 
         ),
         'depth' : adapters_dict['convnext'](num_classes=DOMAIN_CONF['depth']['channels'],
             stride_level=DOMAIN_CONF['depth']['stride_level'],
             patch_size=args.patch_size, 
             prompt_deep = args.prompt_deep , prompt_shallow = args.prompt_shallow,
             prompt_pool = args.prompt_pool,main_tasks=args.decoder_main_tasks.split('-'),
-            prompt_length = args.length , top_k = args.top_k , pool_size = args.size, task_specific_prompt_length = args.task_specific_prompt_length , not_self_attn = args.not_self_attn , 
+            prompt_length = args.length , top_k = args.top_k , pool_size = args.size,
+            task_specific_prompt_length = args.task_specific_prompt_length , not_self_attn = args.not_self_attn , 
         ),
         
     }
@@ -573,7 +570,7 @@ def main(args):
                 p.requires_grad = False
                 
         for name, param in model.named_parameters():
-            if any(substr in name for substr in ['input_adapter','bias', 'output_adapters']):
+            if any(substr in name for substr in ['bias', 'output_adapters']):
                 param.requires_grad = True
 
     # check frozen well 
@@ -874,7 +871,7 @@ def train_one_epoch(model: torch.nn.Module, input_size , prompt_pool ,top_k,prom
             seg_loss = 0
             if 'semseg' in tasks_dict:
                 seg_pred, seg_gt = preds['semseg'], tasks_dict['semseg']
-                seg_loss = criterion(seg_pred, seg_gt)
+                seg_loss = criterion(seg_pred, seg_gt) 
                 
             raw_parameter_seg = model.raw_parameter_seg
             raw_parameter_depth = model.raw_parameter_depth
@@ -884,7 +881,7 @@ def train_one_epoch(model: torch.nn.Module, input_size , prompt_pool ,top_k,prom
             # 뎁스 손실 계산
             depth_loss = 0
             if 'depth' in tasks_dict:
-                depth_loss = tasks_loss_fn['depth'](preds['depth' ].float(), tasks_dict['depth' ].float(), mask_valid=None) 
+                depth_loss = tasks_loss_fn['depth'](preds['depth' ].float(), tasks_dict['depth' ], mask_valid=None)  
            
             #for weight 0~1!
             weight_seg = raw_parameter_seg
@@ -956,7 +953,7 @@ def train_one_epoch(model: torch.nn.Module, input_size , prompt_pool ,top_k,prom
 
 def compute_loss(seg_loss, depth_loss, weight_seg, weight_depth):
     # σ1과 σ2에 대한 역수를 계산합니다.
-    eps = 1e-6
+    eps = 1e-2
     inv_var_depth = 1 / (weight_depth ** 2 +eps)
     inv_var_seg = 1 / (weight_seg ** 2 + eps)
 
@@ -1021,7 +1018,7 @@ def evaluate_seg(model, criterion, data_loader, device, epoch, in_domains, num_c
         with torch.cuda.amp.autocast(enabled=fp16):
             preds = model(input_dict, return_all_layers=return_all_layers)
             seg_pred, seg_gt = preds['semseg'], tasks_dict['semseg']
-            loss = criterion(seg_pred, seg_gt) 
+            loss = criterion(seg_pred, seg_gt)  
             
 
         loss_value = loss.item()

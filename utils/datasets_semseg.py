@@ -54,10 +54,14 @@ def simple_transform(train: bool,
 
     if train:
         transform = A.Compose([
+            A.Resize(input_size , input_size),
+            A.ShiftScaleRotate(shift_limit=0.2, scale_limit=0.2, rotate_limit=30, p=0.5),
+            A.RGBShift(r_shift_limit=25, g_shift_limit=25, b_shift_limit=25, p=0.5),
+            A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=0.5),
             A.HorizontalFlip(p=0.5),
             A.LongestMaxSize(max_size=input_size, p=1),
             A.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1, p=0.5),  # Color jittering from MoCo-v3 / DINO
-            A.RandomScale(scale_limit=(0.1 - 1, 2.0 - 1), p=1),  # This is LSJ (0.1, 2.0)
+            A.RandomScale(scale_limit=(0.1 - 1, 2.0 - 1), p=0.5),  # This is LSJ (0.1, 2.0)
             A.PadIfNeeded(min_height=input_size, min_width=input_size,
                           position=A.augmentations.PadIfNeeded.PositionType.TOP_LEFT,
                           border_mode=cv2.BORDER_CONSTANT,
